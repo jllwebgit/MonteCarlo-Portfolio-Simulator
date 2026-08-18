@@ -5,10 +5,12 @@
 金額はすべて**万円単位**で表示します。
 
 セットアップ
+
 pip install -r requirements.txt
 
 
 起動方法
+
 streamlit run app.py
 
 `http://localhost:8501` が自動的に開きます。`--server.address` 等を指定してのネットワーク公開は想定していません。
