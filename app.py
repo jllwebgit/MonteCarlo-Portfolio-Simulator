@@ -19,6 +19,14 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+try:
+    from scipy.optimize import minimize as _scipy_minimize
+
+    SCIPY_AVAILABLE = True
+except ImportError:
+    _scipy_minimize = None
+    SCIPY_AVAILABLE = False
+
 st.set_page_config(page_title="モンテカルロ・ポートフォリオ・シミュレーター", layout="wide")
 
 st.title("📈 モンテカルロ・ポートフォリオ・シミュレーター")
@@ -37,14 +45,8 @@ CASH_NAME = "円現預金"  # 生活防衛資金など、比率ではなく残�
 # 初期値（デフォルト銘柄セット・相関）
 #
 # 数値は「円建て・為替ヘッジなし」を前提とした参考値です。
-#   - 期待リターン/ボラティリティ: GPIF「第5期中期目標期間における基本ポートフォリオ」
-#     （2025年4月適用、名目期待リターン: 国内株式4〜7.5%・外国株式4.6〜8.1%・
-#     国内債券-0.3〜3.2%・外国債券1.4〜4.9%、国内株式リスク約19%）等の公表値を参考に、
-#     REIT・ゴールド・コモディティ・為替（USD/JPY）は一般的な長期統計を参考にした概算値です。
-#     米ドル現預金（3.75%）・円現預金（1.0%）の期待リターンは指定値です。
-#   - コスト: 各ファンドの信託報酬の概算値です（2026年8月時点、変更されている可能性があります）。
 # 実際の投資判断の際は、必ず最新の目論見書・運用報告書でご確認のうえ、表内の数値を
-# ご自身の見立てに合わせて修正してください（本ツールは将来の成果を保証するものではありません）。
+# 見立てに合わせて修正してください（本ツールは将来の成果を保証するものではありません）。
 # ============================================================
 DEFAULT_ASSET_NAMES = [
     "全世界株式（オール・カントリー）",
@@ -208,6 +210,60 @@ def dedupe_names(names_list):
 
 def fmt_man(x, digits=0):
     return f"{x:,.{digits}f} 万円"
+
+
+# ============================================================
+# ⑤ ポートフォリオ最適化（平均分散最適化・効率的フロンティア）
+# ============================================================
+def _portfolio_variance(w: np.ndarray, cov: np.ndarray) -> float:
+    return float(w @ cov @ w)
+
+
+def solve_min_variance_portfolio(mu: np.ndarray, cov: np.ndarray, target_return=None, w0=None) -> np.ndarray:
+    """空売り・レバレッジなし（各銘柄0〜100%、合計100%）の制約下で、
+    target_returnが指定されればそのリターンを満たす最小分散配分を、
+    指定がなければ純粋な最小分散配分（グローバル最小分散ポートフォリオ）を返す。"""
+    n = len(mu)
+    if w0 is None or len(w0) != n:
+        w0 = np.full(n, 1.0 / n)
+    bounds = [(0.0, 1.0)] * n
+    constraints = [{"type": "eq", "fun": lambda w: np.sum(w) - 1.0}]
+    if target_return is not None:
+        constraints.append({"type": "eq", "fun": lambda w: float(np.dot(w, mu)) - target_return})
+
+    result = _scipy_minimize(
+        lambda w: _portfolio_variance(w, cov),
+        w0,
+        method="SLSQP",
+        bounds=bounds,
+        constraints=constraints,
+        options={"maxiter": 400, "ftol": 1e-14},
+    )
+    w = np.clip(result.x, 0.0, 1.0)
+    total = w.sum()
+    return w / total if total > 1e-9 else w0
+
+
+def build_efficient_frontier(mu: np.ndarray, cov: np.ndarray, n_points: int = 25):
+    """最小分散配分〜最大期待リターン配分（単一銘柄集中）までの効率的フロンティアを、
+    n_points個の(リターン, リスク, 配分)の点列として返す。"""
+    w_minvar = solve_min_variance_portfolio(mu, cov, target_return=None)
+    r_minvar = float(np.dot(w_minvar, mu))
+    r_max = float(np.max(mu))
+
+    if r_max <= r_minvar + 1e-9:
+        targets = np.array([r_minvar])
+    else:
+        targets = np.linspace(r_minvar, r_max, n_points)
+
+    points = []
+    w_prev = w_minvar
+    for r in targets:
+        w = solve_min_variance_portfolio(mu, cov, target_return=float(r), w0=w_prev)
+        risk = float(np.sqrt(max(_portfolio_variance(w, cov), 0.0)))
+        points.append({"return": float(r), "risk": risk, "weights": w})
+        w_prev = w
+    return points, r_minvar, r_max
 
 
 # ============================================================
@@ -399,14 +455,8 @@ st.caption(
     f"「{CASH_NAME}」は生活防衛資金など、比率ではなく金額で維持する待機資金として下に別枠で表示します。"
 )
 
-# 不具合の真因（訂正）: キーのローテーションではなく、「data_editorが返した値（編集結果）を、
-# 同じキーのdata_editorへ次回もそのまま渡し直していたこと」自体が原因だった。
-# data_editorはキーごとに内部で編集差分を自動的に積み上げて管理しているため、
-# こちらが「その差分適用済みの結果」を毎回valueとして渡し直すと、差分が二重に解釈され、
-# 直後の別セルへの編集を取りこぼすことがある（Streamlitの既知のアンチパターン）。
-#
-# 対策: このwidgetに渡す value（baseline）は「入力モードが変わった時」だけ作り直し、
-# それ以外のあらゆる再実行では絶対に書き換えない。編集結果はdata_editorの戻り値からのみ読み取り、
+# このwidgetに渡す value（baseline）は「入力モードが変わった時」だけ作り直し、
+# それ以外のあらゆる再実行では書き換えない。編集結果はdata_editorの戻り値からのみ読み取り、
 # 計算・保存用の別データ（assets_full 等）にのみ反映する。
 if st.session_state.get("_assets_baseline_key") != editor_key:
     source = st.session_state.assets_df.copy()
@@ -755,6 +805,41 @@ if run:
     median_mdd = float(np.median(max_drawdown))
     worst_mdd = float(np.percentile(max_drawdown, 5))
 
+    # ⑤ポートフォリオ最適化用に効率的フロンティアを計算（scipyが無い場合はスキップ）
+    if SCIPY_AVAILABLE:
+        try:
+            frontier_pts, r_minvar, r_max_asset = build_efficient_frontier(mu, cov, n_points=25)
+        except Exception:
+            frontier_pts, r_minvar, r_max_asset = [], None, None
+    else:
+        frontier_pts, r_minvar, r_max_asset = [], None, None
+
+    # 計算結果一式をsession_stateへ保存する。
+    # st.button()の戻り値は押下直後の1回のrerunだけTrueになる仕様のため、下の結果表示部分を
+    # 「if run:」の中に置いたままだと、⑤の新しいスライダーなど別のウィジェットを操作しただけで
+    # runがFalseに戻り、結果表示ごと消えてしまう。session_stateにキャッシュし、結果表示は
+    # 「計算済みの結果があるかどうか」で出し分けることで、この問題を避ける。
+    st.session_state["_sim_result"] = dict(
+        names=names, mu=mu, cov=cov, sigma=sigma, corr=corr, weights=weights,
+        amounts_raw=amounts_raw, actual_initial=actual_initial,
+        assets_noncash_valid=assets_noncash_valid.copy(),
+        initial_investment=initial_investment, target_amount=target_amount,
+        years=years, T=T, rebalance=rebalance, cash_return=float(cash_return),
+        paths_full=paths_full, final_values=final_values, max_drawdown=max_drawdown,
+        flow_arr=flow_arr, has_cashflow=has_cashflow, principal_base=principal_base,
+        expected_return_simple=expected_return_simple, portfolio_risk_pct=portfolio_risk_pct,
+        sharpe_ratio=sharpe_ratio, risk_free_rate_pct=risk_free_rate_pct,
+        mean_cagr=mean_cagr, mean_final=mean_final, median_final=median_final,
+        low_final=low_final, high_final=high_final, mode_final=mode_final,
+        prob_loss=prob_loss, prob_target=prob_target,
+        mean_mdd=mean_mdd, median_mdd=median_mdd, worst_mdd=worst_mdd,
+        frontier_pts=frontier_pts, r_minvar=r_minvar, r_max_asset=r_max_asset,
+    )
+
+sim_result = st.session_state.get("_sim_result")
+if sim_result:
+    globals().update(sim_result)
+
     # --------------------------------------------------------
     # 結果表示
     # --------------------------------------------------------
@@ -785,12 +870,12 @@ if run:
     d1.metric("平均値", fmt_man(mean_final))
     d2.metric("中央値", fmt_man(median_final))
     d3.metric("最頻値（推定）", fmt_man(mode_final))
-    d4.metric("最低額（1%～範囲）", fmt_man(low_final))
-    d5.metric("最高額（～99%範囲）", fmt_man(high_final))
+    d4.metric("最低額（99%範囲）", fmt_man(low_final))
+    d5.metric("最高額（99%範囲）", fmt_man(high_final))
     st.caption(
         "※ 最頻値はシミュレーション結果をヒストグラム化し、最も度数の多い区間の中央値を推定値としたものです。"
-        "最低額・最高額は全試行のうち極端な外れ値0.5%ずつを除いた、確率99%が収まる範囲"
-        "（下位0.5%タイル〜上位99.5%タイル）です。"
+        "最低額・最高額は全試行のうち極端な外れ値1%ずつを除いた、確率98%が収まる範囲"
+        "（下位1%タイル〜上位99%タイル）です。"
     )
 
     st.markdown("##### 最大ドローダウン")
@@ -874,5 +959,125 @@ if run:
             f"モデル: 年次ステップ, {'毎年リバランスあり' if rebalance else 'リバランスなし（バイ&ホールド）'}, "
             f"各銘柄は多変量正規分布に従う年次リターンを仮定。キャッシュフローは年始（当年の運用前）に反映。"
         )
+
+    # --------------------------------------------------------
+    # ⑤ ポートフォリオ最適化（参考）
+    # --------------------------------------------------------
+    st.markdown("---")
+    st.subheader("⑤ ポートフォリオ最適化（参考）")
+
+    if not SCIPY_AVAILABLE:
+        st.warning(
+            "この機能を使うには scipy が必要です。ターミナルで `pip install scipy` を実行し、"
+            "アプリを再起動してください。"
+        )
+    elif r_minvar is None or not frontier_pts:
+        st.warning("最適化の計算に失敗しました（銘柄数が少ない、または分散共分散行列が不正な可能性があります）。")
+    else:
+        st.caption(
+            "①の期待リターン・ボラティリティと②の相関から、平均分散最適化（効率的フロンティア）により、"
+            "同じ銘柄群のままリスク・リターンのバランスだけを変えた配分を試算します"
+            "（空売り・レバレッジなし、各銘柄0〜100%、合計100%が前提の理論値です）。"
+            "スライダーを左に動かすほど「期待リターンを維持しつつリスクを抑える」配分に、"
+            "右に動かすほど「リスクを取ってリターンを狙う」配分になります。"
+            "実際の最頻値への影響を確かめるには、気に入った配分を①へ反映し、"
+            "改めて「▶ シミュレーション実行」してください。"
+        )
+
+        current_return = expected_return_simple / 100.0
+        current_risk = portfolio_risk_pct / 100.0
+
+        slider_min = min(r_minvar, current_return) * 100.0
+        slider_max = max(r_max_asset, current_return) * 100.0
+        if slider_max - slider_min < 0.05:
+            slider_max = slider_min + 0.05
+
+        default_target_pct = float(np.clip(current_return * 100.0, slider_min, slider_max))
+        target_return_pct = st.slider(
+            "目標の期待リターン（年率・コスト控除後、%）",
+            min_value=float(slider_min),
+            max_value=float(slider_max),
+            value=default_target_pct,
+            step=0.05,
+            key="opt_target_return_pct",
+        )
+        target_return = target_return_pct / 100.0
+
+        # 直近のフロンティア点をウォームスタートに、目標リターンぴったりの最小分散配分を再計算
+        nearest = min(frontier_pts, key=lambda p: abs(p["return"] - target_return))
+        w_opt = solve_min_variance_portfolio(mu, cov, target_return=target_return, w0=nearest["weights"])
+        risk_opt = float(np.sqrt(max(_portfolio_variance(w_opt, cov), 0.0)))
+
+        o1, o2, o3 = st.columns(3)
+        o1.metric("提案配分の期待リターン", f"{target_return * 100:.2f}%")
+        o2.metric(
+            "提案配分のリスク（標準偏差）",
+            f"{risk_opt * 100:.2f}%",
+            delta=f"{(risk_opt - current_risk) * 100:+.2f}pt（現状比）",
+            delta_color="inverse",
+        )
+        o3.metric("現状の期待リターン／リスク（参考）", f"{current_return * 100:.2f}% / {current_risk * 100:.2f}%")
+
+        frontier_risk_pct = [p["risk"] * 100.0 for p in frontier_pts]
+        frontier_return_pct = [p["return"] * 100.0 for p in frontier_pts]
+        fig_ef = go.Figure()
+        fig_ef.add_trace(
+            go.Scatter(
+                x=frontier_risk_pct, y=frontier_return_pct, mode="lines",
+                name="効率的フロンティア", line=dict(color="royalblue", width=2),
+            )
+        )
+        fig_ef.add_trace(
+            go.Scatter(
+                x=[current_risk * 100.0], y=[current_return * 100.0], mode="markers",
+                name="現在の配分", marker=dict(color="gray", size=13, symbol="diamond"),
+            )
+        )
+        fig_ef.add_trace(
+            go.Scatter(
+                x=[risk_opt * 100.0], y=[target_return * 100.0], mode="markers",
+                name="提案配分（スライダー）", marker=dict(color="orange", size=15, symbol="star"),
+            )
+        )
+        fig_ef.update_layout(
+            xaxis_title="リスク（標準偏差, %・年率）",
+            yaxis_title="期待リターン（%・年率）",
+            height=420,
+        )
+        st.plotly_chart(fig_ef, use_container_width=True)
+
+        weight_table = pd.DataFrame(
+            {
+                "銘柄名": names,
+                "現在の比率(%)": weights * 100.0,
+                "提案の比率(%)": w_opt * 100.0,
+            }
+        )
+        weight_table["差分(pt)"] = weight_table["提案の比率(%)"] - weight_table["現在の比率(%)"]
+        st.dataframe(
+            weight_table.style.format(
+                {"現在の比率(%)": "{:.1f}", "提案の比率(%)": "{:.1f}", "差分(pt)": "{:+.1f}"}
+            ),
+            use_container_width=True,
+        )
+
+        if st.button("💡 この提案配分を①銘柄設定に反映する", key="apply_optimized_weights"):
+            n_noncash = len(assets_noncash_valid)
+            updated = assets_noncash_valid.copy().reset_index(drop=True)
+            w_noncash = w_opt[:n_noncash]
+            updated["投資金額(万円)"] = w_noncash * actual_initial
+            updated["投資比率(%)"] = w_noncash * 100.0
+            st.session_state.assets_df = updated[ASSET_COLS]
+            # ①のdata_editorに確実に反映させるため、baselineを作り直させたうえで
+            # ウィジェットのkey自体もローテーションし、古い編集差分を引き継がせない
+            # （JSON読込時に③積立取崩が反映されない不具合の修正と同じ仕組み）。
+            st.session_state.pop("assets_editor_baseline", None)
+            st.session_state.pop("_assets_baseline_key", None)
+            st.session_state["_scenario_gen"] = st.session_state.get("_scenario_gen", 0) + 1
+            st.success(
+                "①銘柄設定に反映しました。内容を確認のうえ、"
+                "「▶ シミュレーション実行」で最頻値などへの影響を確認してください。"
+            )
+            st.rerun()
 else:
     st.info("① 銘柄設定・② 相関・③ 積立取崩を確認し、「▶ シミュレーション実行」ボタンを押してください。")
