@@ -35,6 +35,11 @@ st.caption(
     "将来の資産推移を確率的にシミュレーションします。"
     "本ツールはローカル環境での利用を想定しています（ネットワーク公開は非推奨）。金額はすべて万円単位です。"
 )
+st.info(
+    "📱 スマートフォンでご覧の場合：画面左上の「››」アイコンをタップするとサイドバーが開き、"
+    "基本設定（投資年数・目標金額など）と設定の保存・読込メニューを操作できます。",
+    icon="📱",
+)
 
 ASSET_COLS = ["銘柄名", "投資金額(万円)", "投資比率(%)", "期待リターン(%)", "ボラティリティ(%)", "コスト(%)"]
 ASSET_NUMERIC_COLS = ["投資金額(万円)", "投資比率(%)", "期待リターン(%)", "ボラティリティ(%)", "コスト(%)"]
@@ -244,6 +249,26 @@ def fmt_man(x, digits=0):
     return f"{x:,.{digits}f} 万円"
 
 
+def metric_row(*items, width: int = 190) -> None:
+    """st.columnsの代わりに使う横並び指標表示ヘルパー。
+
+    st.columnsは画面が狭い（スマホ幅）と各列が1個ずつ縦に積み重なってしまい、
+    指標を確認するだけで長いスクロールが必要になる。st.container(horizontal=True)は
+    入り切らない分だけ自動的に次の行へ折り返す（flex-wrap）ため、スマホでも
+    2〜3個ずつ横に並び、PCでは従来通り1行に並ぶ。
+
+    items: (label, value) または (label, value, {st.metricへの追加kwargs}) のタプルを可変長で渡す。
+    """
+    with st.container(horizontal=True, gap="small"):
+        for item in items:
+            if len(item) == 3:
+                label, value, extra = item
+            else:
+                label, value = item
+                extra = {}
+            st.metric(label, value, width=width, **extra)
+
+
 # ============================================================
 # ⑤ ポートフォリオ最適化（平均分散最適化・効率的フロンティア）
 # ============================================================
@@ -435,15 +460,15 @@ with st.sidebar:
 with st.sidebar:
     st.header("基本設定（金額は万円単位）")
     initial_investment = st.number_input(
-        "初期投資額（万円）", min_value=0.0, value=2000.0, step=10.0, format="%.0f", key="initial_investment_input"
+        "初期投資額（万円）", min_value=0.0, value=1000.0, step=10.0, format="%.0f", key="initial_investment_input"
     )
     years = st.number_input(
-        "投資年数（年）", min_value=1, max_value=100, value=30, step=1, key="years_input"
+        "投資年数（年）", min_value=1, max_value=100, value=15, step=1, key="years_input"
     )
     target_amount = st.number_input(
         "目標金額（万円）",
         min_value=0.0,
-        value=4000.0,
+        value=2000.0,
         step=10.0,
         format="%.0f",
         key="target_amount_input",
@@ -485,6 +510,7 @@ editor_key = f"assets_editor_{'amt' if amt_editable else 'ratio'}_{_scenario_gen
 st.caption(
     f"{active_col} の列を編集してください。"
     f"「{CASH_NAME}」は生活防衛資金など、比率ではなく金額で維持する待機資金として下に別枠で表示します。"
+    "（スマホでは表を左右にスワイプできます。銘柄名の列は固定表示されます。）"
 )
 
 # このwidgetに渡す value（baseline）は「入力モードが変わった時」だけ作り直し、
@@ -506,10 +532,10 @@ if st.session_state.get("_assets_baseline_key") != editor_key:
 assets_edit = st.data_editor(
     st.session_state["assets_editor_baseline"],
     num_rows="dynamic",
-    use_container_width=True,
+    width="stretch",
     key=editor_key,
     column_config={
-        "銘柄名": st.column_config.TextColumn(required=True),
+        "銘柄名": st.column_config.TextColumn(required=True, pinned=True),
         active_col: st.column_config.NumberColumn(format="%.1f" if amt_editable else "%.2f"),
         "期待リターン(%)": st.column_config.NumberColumn(format="%.2f"),
         "ボラティリティ(%)": st.column_config.NumberColumn(min_value=0.0, format="%.2f"),
@@ -544,19 +570,17 @@ other_sum = float(assets_df["投資金額(万円)"].sum())
 cash_amount = max(initial_investment - other_sum, 0.0)
 cash_ratio = cash_amount / initial_investment * 100.0 if initial_investment > 0 else 0.0
 
-cc1, cc2, cc3 = st.columns([2, 1, 1])
-with cc1:
+with st.container(horizontal=True, gap="medium"):
     cash_return = st.number_input(
         f"{CASH_NAME}の期待リターン（%）",
         value=float(st.session_state.get("cash_return_input", CASH_DEFAULT_RETURN)),
         step=0.05,
         format="%.2f",
         key="cash_return_input",
+        width=260,
     )
-with cc2:
-    st.metric(f"{CASH_NAME}（自動計算・待機資金）", fmt_man(cash_amount))
-with cc3:
-    st.metric(f"{CASH_NAME}の投資比率", f"{cash_ratio:.1f}%")
+    st.metric(f"{CASH_NAME}（自動計算）", fmt_man(cash_amount), width=200)
+    st.metric(f"{CASH_NAME}の投資比率", f"{cash_ratio:.1f}%", width=160)
 
 if other_sum > initial_investment + 1e-9:
     st.warning(
@@ -614,12 +638,18 @@ if "corr_editor_baseline" not in st.session_state or list(st.session_state["corr
 
 corr_edit = st.data_editor(
     st.session_state["corr_editor_baseline"],
-    use_container_width=True,
+    width="stretch",
     key=f"corr_editor_{_scenario_gen}",
     column_config={
-        nm: st.column_config.NumberColumn(min_value=-1.0, max_value=1.0, step=0.05, format="%.2f")
+        nm: st.column_config.NumberColumn(
+            min_value=-1.0, max_value=1.0, step=0.05, format="%.2f", width="small"
+        )
         for nm in names
     },
+)
+st.caption(
+    "💡 銘柄数が多いと表が横に長くなります。スマホでは表を左右にスワイプしてください"
+    "（先頭列の銘柄名は固定表示されるので、スクロールしても行が分かります）。"
 )
 
 # NaN・範囲外を補正した「解決済み」値は計算専用（corr_df）に保存し、baselineには書き戻さない
@@ -660,7 +690,7 @@ if "cashflow_editor_baseline" not in st.session_state:
 cashflow_edit = st.data_editor(
     st.session_state["cashflow_editor_baseline"],
     num_rows="dynamic",
-    use_container_width=True,
+    width="stretch",
     key=f"cashflow_editor_{_scenario_gen}",
     column_config={
         "種別": st.column_config.SelectboxColumn(options=["積立", "取崩"], required=True),
@@ -878,32 +908,36 @@ if sim_result:
     st.subheader("④ 結果")
 
     st.markdown("##### ポートフォリオ全体の前提（年率・入力値ベース）")
-    p1, p2, p3 = st.columns(3)
-    p1.metric("期待リターン（加重平均）", f"{expected_return_simple:.2f}%")
-    p2.metric("リスク（標準偏差）", f"{portfolio_risk_pct:.2f}%")
-    p3.metric(
-        "シャープレシオ",
-        f"{sharpe_ratio:.2f}" if np.isfinite(sharpe_ratio) else "—",
-        help=f"無リスク金利として{CASH_NAME}の期待リターン（{risk_free_rate_pct:.2f}%）を使用して算出しています。",
+    metric_row(
+        ("期待リターン（加重平均）", f"{expected_return_simple:.2f}%"),
+        ("リスク（標準偏差）", f"{portfolio_risk_pct:.2f}%"),
+        (
+            "シャープレシオ",
+            f"{sharpe_ratio:.2f}" if np.isfinite(sharpe_ratio) else "—",
+            {"help": f"無リスク金利として{CASH_NAME}の期待リターン（{risk_free_rate_pct:.2f}%）を使用して算出しています。"},
+        ),
     )
 
     st.markdown("##### シミュレーション結果（確率）")
-    c1, c2, c3 = st.columns(3)
     if mean_cagr is not None:
-        c1.metric("シミュレーション平均CAGR", f"{mean_cagr * 100:.2f}%")
+        cagr_value = f"{mean_cagr * 100:.2f}%"
     else:
-        c1.metric("シミュレーション平均CAGR", "—（積立/取崩ありのため非表示）")
-    c2.metric("元本割れ確率", f"{prob_loss * 100:.1f}%")
-    c3.metric("目標額到達確率", f"{prob_target * 100:.1f}%")
+        cagr_value = "—（積立/取崩ありのため非表示）"
+    metric_row(
+        ("シミュレーション平均CAGR", cagr_value),
+        ("元本割れ確率", f"{prob_loss * 100:.1f}%"),
+        ("目標額到達確率", f"{prob_target * 100:.1f}%"),
+    )
     st.caption(f"※ 元本割れ確率は累計投入元本（初期投資額 + 積立 − 取崩 = {fmt_man(principal_base)}）との比較です。")
 
     st.markdown("##### 最終資産額の分布（万円）")
-    d1, d2, d3, d4, d5 = st.columns(5)
-    d1.metric("平均値", fmt_man(mean_final))
-    d2.metric("中央値", fmt_man(median_final))
-    d3.metric("最頻値（推定）", fmt_man(mode_final))
-    d4.metric("最低額（99%範囲）", fmt_man(low_final))
-    d5.metric("最高額（99%範囲）", fmt_man(high_final))
+    metric_row(
+        ("平均値", fmt_man(mean_final)),
+        ("中央値", fmt_man(median_final)),
+        ("最頻値（推定）", fmt_man(mode_final)),
+        ("最低額（99%範囲）", fmt_man(low_final)),
+        ("最高額（99%範囲）", fmt_man(high_final)),
+    )
     st.caption(
         "※ 最頻値はシミュレーション結果をヒストグラム化し、最も度数の多い区間の中央値を推定値としたものです。"
         "最低額・最高額は全試行のうち極端な外れ値1%ずつを除いた、確率98%が収まる範囲"
@@ -911,10 +945,11 @@ if sim_result:
     )
 
     st.markdown("##### 最大ドローダウン")
-    e1, e2, e3 = st.columns(3)
-    e1.metric("平均", f"{mean_mdd * 100:.1f}%")
-    e2.metric("中央値", f"{median_mdd * 100:.1f}%")
-    e3.metric("悪化5%タイル", f"{worst_mdd * 100:.1f}%")
+    metric_row(
+        ("平均", f"{mean_mdd * 100:.1f}%"),
+        ("中央値", f"{median_mdd * 100:.1f}%"),
+        ("悪化5%タイル", f"{worst_mdd * 100:.1f}%"),
+    )
 
     # --------------------------------------------------------
     # ファンチャート（資産推移の分布）
@@ -950,7 +985,7 @@ if sim_result:
         yaxis=dict(tickformat=",.0f", separatethousands=True),
         height=500,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
     # --------------------------------------------------------
     # 最終資産額のヒストグラム
@@ -968,7 +1003,7 @@ if sim_result:
         yaxis_title="頻度",
         height=400,
     )
-    st.plotly_chart(fig2, use_container_width=True)
+    st.plotly_chart(fig2, width="stretch")
 
     # --------------------------------------------------------
     # 最大ドローダウンのヒストグラム
@@ -978,7 +1013,7 @@ if sim_result:
     fig3 = go.Figure()
     fig3.add_trace(go.Histogram(x=max_drawdown * 100, nbinsx=500, marker_color="indianred"))
     fig3.update_layout(xaxis_title="最大ドローダウン（%）", yaxis_title="頻度", height=350)
-    st.plotly_chart(fig3, use_container_width=True)
+    st.plotly_chart(fig3, width="stretch")
 
     with st.expander("シミュレーション設定の詳細"):
         st.write(f"銘柄ごとの投資金額・比率（実際の投資金額合計: {fmt_man(actual_initial)}）")
@@ -1040,15 +1075,18 @@ if sim_result:
         w_opt = solve_min_variance_portfolio(mu, cov, target_return=target_return, w0=nearest["weights"])
         risk_opt = float(np.sqrt(max(_portfolio_variance(w_opt, cov), 0.0)))
 
-        o1, o2, o3 = st.columns(3)
-        o1.metric("提案配分の期待リターン", f"{target_return * 100:.2f}%")
-        o2.metric(
-            "提案配分のリスク（標準偏差）",
-            f"{risk_opt * 100:.2f}%",
-            delta=f"{(risk_opt - current_risk) * 100:+.2f}pt（現状比）",
-            delta_color="inverse",
+        metric_row(
+            ("提案配分の期待リターン", f"{target_return * 100:.2f}%"),
+            (
+                "提案配分のリスク（標準偏差）",
+                f"{risk_opt * 100:.2f}%",
+                {
+                    "delta": f"{(risk_opt - current_risk) * 100:+.2f}pt（現状比）",
+                    "delta_color": "inverse",
+                },
+            ),
+            ("現状の期待リターン／リスク（参考）", f"{current_return * 100:.2f}% / {current_risk * 100:.2f}%"),
         )
-        o3.metric("現状の期待リターン／リスク（参考）", f"{current_return * 100:.2f}% / {current_risk * 100:.2f}%")
 
         frontier_risk_pct = [p["risk"] * 100.0 for p in frontier_pts]
         frontier_return_pct = [p["return"] * 100.0 for p in frontier_pts]
@@ -1076,7 +1114,7 @@ if sim_result:
             yaxis_title="期待リターン（%・年率）",
             height=420,
         )
-        st.plotly_chart(fig_ef, use_container_width=True)
+        st.plotly_chart(fig_ef, width="stretch")
 
         weight_table = pd.DataFrame(
             {
@@ -1090,7 +1128,7 @@ if sim_result:
             weight_table.style.format(
                 {"現在の比率(%)": "{:.1f}", "提案の比率(%)": "{:.1f}", "差分(pt)": "{:+.1f}"}
             ),
-            use_container_width=True,
+            width="stretch",
         )
 
         if st.button("💡 この提案配分を①銘柄設定に反映する", key="apply_optimized_weights"):
