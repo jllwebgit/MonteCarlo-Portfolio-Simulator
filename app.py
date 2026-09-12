@@ -535,12 +535,17 @@ assets_edit = st.data_editor(
     width="stretch",
     key=editor_key,
     column_config={
-        "銘柄名": st.column_config.TextColumn(required=True, pinned=True),
-        active_col: st.column_config.NumberColumn(format="%.1f" if amt_editable else "%.2f"),
-        "期待リターン(%)": st.column_config.NumberColumn(format="%.2f"),
-        "ボラティリティ(%)": st.column_config.NumberColumn(min_value=0.0, format="%.2f"),
-        "コスト(%)": st.column_config.NumberColumn(min_value=0.0, format="%.2f"),
+        "銘柄名": st.column_config.TextColumn(required=True, pinned=True, width="medium"),
+        active_col: st.column_config.NumberColumn(
+            format="%.1f" if amt_editable else "%.2f", width=100
+        ),
+        "期待リターン(%)": st.column_config.NumberColumn(format="%.2f", width="small"),
+        "ボラティリティ(%)": st.column_config.NumberColumn(min_value=0.0, format="%.2f", width="small"),
+        "コスト(%)": st.column_config.NumberColumn(min_value=0.0, format="%.2f", width="small"),
     },
+)
+st.caption(
+    "💡 各列の境界をドラッグすると幅を調整できます（銘柄名を広げたい／入力欄を広げたい場合など）。"
 )
 
 # NaNを残さずクリーニング（コピー上で行う。baseline自体は一切書き換えない）
@@ -579,7 +584,7 @@ with st.container(horizontal=True, gap="medium"):
         key="cash_return_input",
         width=260,
     )
-    st.metric(f"{CASH_NAME}（自動計算）", fmt_man(cash_amount), width=200)
+    st.metric(f"{CASH_NAME}（自動計算・待機資金）", fmt_man(cash_amount), width=200)
     st.metric(f"{CASH_NAME}の投資比率", f"{cash_ratio:.1f}%", width=160)
 
 if other_sum > initial_investment + 1e-9:
