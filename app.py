@@ -534,6 +534,7 @@ assets_edit = st.data_editor(
     num_rows="dynamic",
     width="stretch",
     key=editor_key,
+    column_order=view_cols,
     column_config={
         "銘柄名": st.column_config.TextColumn(required=True, pinned=True, width="medium"),
         active_col: st.column_config.NumberColumn(
@@ -545,7 +546,11 @@ assets_edit = st.data_editor(
     },
 )
 st.caption(
-    "💡 各列の境界をドラッグすると幅を調整できます（銘柄名を広げたい／入力欄を広げたい場合など）。"
+    "💡 各列の境界をドラッグすると幅を調整できます。"
+    "スマホで横スクロールする際は、見出し（列名）ではなく数値セル側を指でスワイプしてください"
+    "（見出しをつかむと『列の並べ替え』操作として扱われ、銘柄名と数値の列が入れ替わることがあります。"
+    "万一入れ替わった場合も内部データは列名で管理しているため壊れませんが、気になる場合は同じ操作で"
+    "ドラッグして元の並びに戻すか、ページを再読み込みしてください）。"
 )
 
 # NaNを残さずクリーニング（コピー上で行う。baseline自体は一切書き換えない）
@@ -645,6 +650,7 @@ corr_edit = st.data_editor(
     st.session_state["corr_editor_baseline"],
     width="stretch",
     key=f"corr_editor_{_scenario_gen}",
+    column_order=names,
     column_config={
         nm: st.column_config.NumberColumn(
             min_value=-1.0, max_value=1.0, step=0.05, format="%.2f", width="small"
@@ -697,6 +703,7 @@ cashflow_edit = st.data_editor(
     num_rows="dynamic",
     width="stretch",
     key=f"cashflow_editor_{_scenario_gen}",
+    column_order=CASHFLOW_COLS,
     column_config={
         "種別": st.column_config.SelectboxColumn(options=["積立", "取崩"], required=True),
         "金額(万円/年)": st.column_config.NumberColumn(min_value=0.0, format="%.1f"),
