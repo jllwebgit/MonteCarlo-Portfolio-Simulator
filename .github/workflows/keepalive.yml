@@ -1,0 +1,38 @@
+name: Streamlit Keepalive
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'  # 6時間ごと（UTC基準）
+  workflow_dispatch:  # Actionsタブから手動実行したいとき用
+
+permissions:
+  contents: read
+  actions: write  # 下の「無効化防止」ステップに必要
+
+env:
+  STREAMLIT_APP_URL: https://montecarlo-portfolio-simulator-a7d5pfukvvvoy9tytzhc96.streamlit.app/
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Playwright
+        run: |
+          pip install playwright
+          playwright install chromium --with-deps
+
+      - name: Ping Streamlit app
+        run: python scripts/keepalive.py
+
+      - name: Keep workflow enabled (reset GitHub's 60-day inactivity timer)
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/keepalive.yml/enable"
