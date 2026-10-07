@@ -4,8 +4,8 @@
 ローカル実行専用（streamlit run app.py）
 
 複数銘柄（アセット）の期待リターン・ボラティリティ・コスト・銘柄間相関、
-および積立・取崩（キャッシュフロー）を入力し、モンテカルロ法で
-将来の資産評価額の分布をシミュレーションする。
+および毎月の積立・取崩（キャッシュフロー）を入力し、モンテカルロ法で
+将来の資産評価額の分布を月次ステップでシミュレーションする。
 
 金額はすべて「万円」単位で入力・表示する。
 設定（銘柄・相関・積立取崩・初期投資額など）はJSONファイルとして保存し、
@@ -42,7 +42,7 @@ st.info(
 
 ASSET_COLS = ["銘柄名", "投資金額(万円)", "投資比率(%)", "期待リターン(%)", "ボラティリティ(%)", "コスト(%)"]
 ASSET_NUMERIC_COLS = ["投資金額(万円)", "投資比率(%)", "期待リターン(%)", "ボラティリティ(%)", "コスト(%)"]
-CASHFLOW_COLS = ["種別", "金額(万円/年)", "開始年", "終了年"]
+CASHFLOW_COLS = ["種別", "金額(万円/月)", "開始月", "終了月"]
 CASH_NAME = "円現預金"  # 生活防衛資金など、比率ではなく残額で維持する待機資金の銘柄名
 
 # ============================================================
@@ -420,11 +420,16 @@ def build_scenario_json() -> str:
 
     cashflow_state = st.session_state.get("cashflow_df", pd.DataFrame(columns=CASHFLOW_COLS))
     cashflow_export = cashflow_state.rename(
-        columns={"種別": "type", "金額(万円/年)": "amount", "開始年": "start_year", "終了年": "end_year"}
+        columns={
+            "種別": "type",
+            "金額(万円/月)": "amount_per_month",
+            "開始月": "start_month",
+            "終了月": "end_month",
+        }
     ).to_dict(orient="records")
 
     data = {
-        "version": 1,
+        "version": 2,
         "saved_at": pd.Timestamp.now().isoformat(timespec="seconds"),
         "initial_investment": st.session_state.get("initial_investment_input", 2000.0),
         "years": st.session_state.get("years_input", 30),
@@ -494,9 +499,9 @@ def apply_scenario(data: dict) -> None:
         cf_rows.append(
             {
                 "種別": str(c.get("type", "積立")),
-                "金額(万円/年)": float(c.get("amount", 0.0)),
-                "開始年": int(c.get("start_year", 1)),
-                "終了年": int(c.get("end_year", 30)),
+                "金額(万円/月)": float(c.get("amount_per_month", 0.0)),
+                "開始月": int(c.get("start_month", 1)),
+                "終了月": int(c.get("end_month", int(data.get("years", 30)) * 12)),
             }
         )
     if cf_rows:
@@ -552,7 +557,7 @@ with st.sidebar:
         "乱数シード（0 = 毎回ランダム）", min_value=0, value=0, step=1, key="seed_input",
         help="同じ条件で再現性のある結果を得たい場合は 1 以上を指定してください。",
     )
-    st.caption("※ コストは各銘柄の期待リターンから毎年差し引かれる前提です（簡易モデル）。")
+    st.caption("※ コストは各銘柄の期待リターンから年率で差し引き、その後、月次リターンへ変換して12回/年積み上げます（簡易モデル）。")
 
 years = int(years)
 
@@ -751,35 +756,78 @@ corr_df = corr_clean
 # ============================================================
 st.subheader("③ 積立・取崩")
 st.caption(
-    "毎年の積立や取崩しを複数行登録できます。開始年〜終了年（投資年数を1年目とする）の間、"
-    "毎年その金額を加算/減算します。金額は万円単位、その年の運用開始前に反映されます。"
+    "毎月の積立や取崩しを複数行登録できます。開始月〜終了月（投資開始月を1か月目とする）の間、"
+    "毎月その金額を加算/減算します。金額は万円単位、その月の運用開始前に反映されます。"
 )
+st.caption(
+    f"💡 投資年数を変更すると、変更前の投資期間末（例：30年なら360か月）に設定していた行の終了月は、"
+    f"新しい投資期間末（現在：{years * 12}か月）へ自動追随します。短縮した場合は新しい期間末を超える終了月を自動的に切り詰めます。"
+)
+
+current_period_months = years * 12
+cashflow_editor_key = f"cashflow_editor_{_scenario_gen}_{st.session_state.get('_cashflow_editor_gen', 0)}"
 
 if "cashflow_editor_baseline" not in st.session_state:
     uploaded_cf = st.session_state.get("cashflow_df")
     if uploaded_cf is not None and not uploaded_cf.empty:
-        st.session_state["cashflow_editor_baseline"] = uploaded_cf.reset_index(drop=True)
+        baseline = uploaded_cf.copy().reset_index(drop=True)
+        baseline["終了月"] = pd.to_numeric(baseline["終了月"], errors="coerce").fillna(current_period_months)
+        baseline["開始月"] = pd.to_numeric(baseline["開始月"], errors="coerce").fillna(1)
+        baseline["終了月"] = baseline["終了月"].clip(lower=1, upper=current_period_months).astype(int)
+        baseline["開始月"] = baseline["開始月"].clip(lower=1, upper=current_period_months).astype(int)
+        st.session_state["cashflow_editor_baseline"] = baseline[CASHFLOW_COLS]
     else:
         st.session_state["cashflow_editor_baseline"] = pd.DataFrame(
             {
                 "種別": ["積立"],
-                "金額(万円/年)": [0.0],
-                "開始年": [1],
-                "終了年": [years],
+                "金額(万円/月)": [0.0],
+                "開始月": [1],
+                "終了月": [current_period_months],
             }
         )
+    st.session_state["_cashflow_last_years"] = years
+else:
+    # 投資年数が変更された場合、直前の編集結果（cashflow_df）を基に終了月を調整する。
+    # 「前の期間末まで」としていた行だけは新しい期間末へ追随させ、任意に設定した短い終了月は維持する。
+    last_years = st.session_state.get("_cashflow_last_years")
+    if last_years is not None and int(last_years) != years:
+        old_period_months = int(last_years) * 12
+        previous = st.session_state.get("cashflow_df")
+        if previous is None or previous.empty:
+            previous = st.session_state["cashflow_editor_baseline"]
+        else:
+            previous = previous.copy()
+
+        previous = previous.reindex(columns=CASHFLOW_COLS).copy()
+        previous["開始月"] = pd.to_numeric(previous["開始月"], errors="coerce").fillna(1)
+        previous["終了月"] = pd.to_numeric(previous["終了月"], errors="coerce").fillna(old_period_months)
+
+        end_values = previous["終了月"].to_numpy(dtype=float, copy=True)
+        start_values = previous["開始月"].to_numpy(dtype=float, copy=True)
+        # 変更前の期間末に設定されていた行だけを、新しい期間末へ自動追随。
+        end_values[np.isclose(end_values, old_period_months)] = current_period_months
+        # 投資年数を短縮した場合、期間外の値は新しい期間末へ切り詰める。
+        end_values = np.clip(end_values, 1, current_period_months)
+        start_values = np.clip(start_values, 1, current_period_months)
+        previous["終了月"] = np.rint(end_values).astype(int)
+        previous["開始月"] = np.rint(start_values).astype(int)
+
+        st.session_state["cashflow_editor_baseline"] = previous[CASHFLOW_COLS].reset_index(drop=True)
+        st.session_state["_cashflow_last_years"] = years
+        st.session_state["_cashflow_editor_gen"] = st.session_state.get("_cashflow_editor_gen", 0) + 1
+        cashflow_editor_key = f"cashflow_editor_{_scenario_gen}_{st.session_state['_cashflow_editor_gen']}"
 
 cashflow_edit = st.data_editor(
     st.session_state["cashflow_editor_baseline"],
     num_rows="dynamic",
     width="stretch",
-    key=f"cashflow_editor_{_scenario_gen}",
+    key=cashflow_editor_key,
     column_order=CASHFLOW_COLS,
     column_config={
         "種別": st.column_config.SelectboxColumn(options=["積立", "取崩"], required=True),
-        "金額(万円/年)": st.column_config.NumberColumn(min_value=0.0, format="%.1f"),
-        "開始年": st.column_config.NumberColumn(min_value=1, max_value=100, step=1, format="%d"),
-        "終了年": st.column_config.NumberColumn(min_value=1, max_value=100, step=1, format="%d"),
+        "金額(万円/月)": st.column_config.NumberColumn(min_value=0.0, format="%.1f"),
+        "開始月": st.column_config.NumberColumn(min_value=1, max_value=current_period_months, step=1, format="%d"),
+        "終了月": st.column_config.NumberColumn(min_value=1, max_value=current_period_months, step=1, format="%d"),
     },
 )
 
@@ -787,26 +835,37 @@ cashflow_edit = st.data_editor(
 cashflow_clean = cashflow_edit.copy()
 cashflow_clean["種別"] = cashflow_clean["種別"].fillna("積立")
 cashflow_clean.loc[~cashflow_clean["種別"].isin(["積立", "取崩"]), "種別"] = "積立"
-cashflow_clean["金額(万円/年)"] = pd.to_numeric(cashflow_clean["金額(万円/年)"], errors="coerce").fillna(0.0)
-cashflow_clean["開始年"] = pd.to_numeric(cashflow_clean["開始年"], errors="coerce").fillna(1).astype(int)
-cashflow_clean["終了年"] = pd.to_numeric(cashflow_clean["終了年"], errors="coerce").fillna(years).astype(int)
+cashflow_clean["金額(万円/月)"] = pd.to_numeric(cashflow_clean["金額(万円/月)"], errors="coerce").fillna(0.0)
+cashflow_clean["開始月"] = pd.to_numeric(cashflow_clean["開始月"], errors="coerce").fillna(1).astype(int)
+cashflow_clean["終了月"] = pd.to_numeric(cashflow_clean["終了月"], errors="coerce").fillna(years * 12).astype(int)
+cashflow_clean["開始月"] = cashflow_clean["開始月"].clip(lower=1, upper=years * 12)
+cashflow_clean["終了月"] = cashflow_clean["終了月"].clip(lower=1, upper=years * 12)
 st.session_state.cashflow_df = cashflow_clean
 cashflow_df = cashflow_clean
 
 
-def build_cashflow_array(cf_df: pd.DataFrame, T: int) -> np.ndarray:
-    flow = np.zeros(T)
+def build_cashflow_array(cf_df: pd.DataFrame, T_months: int) -> np.ndarray:
+    """毎月のネットキャッシュフロー（万円）の配列を作る。"""
+    flow = np.zeros(T_months)
     for _, row in cf_df.iterrows():
-        amt = float(row["金額(万円/年)"])
+        amt = float(row["金額(万円/月)"])
         if amt == 0:
             continue
-        start = max(1, int(row["開始年"]))
-        end = min(T, int(row["終了年"]))
+        start = max(1, int(row["開始月"]))
+        end = min(T_months, int(row["終了月"]))
         if start > end:
             continue
         sign = 1.0 if row["種別"] == "積立" else -1.0
         flow[start - 1:end] += sign * amt
     return flow
+
+
+def annual_to_monthly_rate(annual_rate: np.ndarray) -> np.ndarray:
+    """年率の実効リターンを、12回複利して同じ年率になる月率へ変換する。"""
+    annual_rate = np.asarray(annual_rate, dtype=float)
+    if np.any(annual_rate <= -1.0):
+        raise ValueError("期待リターン（コスト控除後）は -100% より大きい必要があります。")
+    return np.power(1.0 + annual_rate, 1.0 / 12.0) - 1.0
 
 
 # ============================================================
@@ -859,21 +918,33 @@ if run:
         L = np.linalg.cholesky(cov + np.eye(len(sigma)) * jitter)
 
     M = int(n_sims)
-    T = int(years)
+    T_years = int(years)
+    T_months = T_years * 12
     N = len(weights)
 
-    z = rng.standard_normal(size=(M, T, N))
-    correlated = z @ L.T
-    asset_returns = mu + correlated  # (M, T, N)
+    # 年率の期待リターン・ボラティリティを月次モデルへ変換。
+    # 期待リターンは12回複利して年率入力値になる実効月率、
+    # ボラティリティは年率÷sqrt(12)とする。
+    mu_monthly = annual_to_monthly_rate(mu)
+    sigma_monthly = sigma / np.sqrt(12.0)
+    cov_monthly = np.outer(sigma_monthly, sigma_monthly) * corr
 
-    flow_arr = build_cashflow_array(cashflow_df, T)  # 万円/年, 長さT
+    try:
+        L_monthly = np.linalg.cholesky(cov_monthly)
+    except np.linalg.LinAlgError:
+        jitter = 1e-12
+        L_monthly = np.linalg.cholesky(cov_monthly + np.eye(len(sigma_monthly)) * jitter)
+
+    flow_arr = build_cashflow_array(cashflow_df, T_months)  # 万円/月, 長さT_months
     has_cashflow = bool(np.any(flow_arr != 0))
 
     asset_values = np.zeros((M, N))
     asset_values[:, :] = amounts_raw[None, :]
     path_list = [asset_values.sum(axis=1)]
 
-    for t in range(T):
+    # 巨大な(M, 月数, 銘柄数)配列を持たず、毎月1回ずつ乱数を生成する。
+    # 30年・10,000試行でもメモリ使用量を抑えながら12回/年の月次積み上げを行う。
+    for t in range(T_months):
         net_flow = flow_arr[t]
         if net_flow >= 0:
             asset_values = asset_values + net_flow * weights[None, :]
@@ -884,7 +955,10 @@ if run:
             asset_values = asset_values + net_flow * proportion
         asset_values = np.maximum(asset_values, 0.0)
 
-        growth = np.maximum(1.0 + asset_returns[:, t, :], 0.0)
+        z_month = rng.standard_normal(size=(M, N))
+        correlated_month = z_month @ L_monthly.T
+        monthly_returns = mu_monthly[None, :] + correlated_month
+        growth = np.maximum(1.0 + monthly_returns, 0.0)
         asset_values = asset_values * growth
 
         if rebalance:
@@ -894,7 +968,7 @@ if run:
         asset_values = np.maximum(asset_values, 0.0)
         path_list.append(asset_values.sum(axis=1))
 
-    paths_full = np.stack(path_list, axis=1)  # (M, T+1) 万円単位
+    paths_full = np.stack(path_list, axis=1)  # (M, T_months+1) 万円単位
     final_values = paths_full[:, -1]
 
     running_max = np.maximum.accumulate(paths_full, axis=1)
@@ -927,7 +1001,7 @@ if run:
 
     if not has_cashflow and actual_initial > 0:
         with np.errstate(invalid="ignore"):
-            cagr = np.where(final_values > 0, (final_values / actual_initial) ** (1.0 / T) - 1.0, -1.0)
+            cagr = np.where(final_values > 0, (final_values / actual_initial) ** (12.0 / T_months) - 1.0, -1.0)
         mean_cagr = float(np.mean(cagr))
     else:
         mean_cagr = None
@@ -969,7 +1043,7 @@ if run:
         amounts_raw=amounts_raw, actual_initial=actual_initial,
         assets_noncash_valid=assets_noncash_valid.copy(),
         initial_investment=initial_investment, target_amount=target_amount,
-        years=years, T=T, rebalance=rebalance, cash_return=float(cash_return),
+        years=years, T=T_months, T_years=T_years, T_months=T_months, rebalance=rebalance, cash_return=float(cash_return),
         paths_full=paths_full, final_values=final_values, max_drawdown=max_drawdown,
         flow_arr=flow_arr, has_cashflow=has_cashflow, principal_base=principal_base,
         expected_return_simple=expected_return_simple, portfolio_risk_pct=portfolio_risk_pct,
@@ -1040,7 +1114,7 @@ if sim_result:
     st.markdown("#### 資産推移の分布（ファンチャート、単位：万円）")
     pct_levels = [5, 25, 50, 75, 95]
     percentiles = np.percentile(paths_full, pct_levels, axis=0)
-    x = np.arange(0, T + 1)
+    x = np.arange(0, T_months + 1) / 12.0
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=x, y=percentiles[4], line=dict(width=0), showlegend=False, hoverinfo="skip"))
@@ -1103,11 +1177,19 @@ if sim_result:
         st.dataframe(pd.DataFrame({"銘柄名": names, "投資金額(万円)": amounts_raw, "比率(%)": weights * 100}))
         st.write("使用した相関行列（対称化・対角=1に補正済み）")
         st.dataframe(pd.DataFrame(corr, index=names, columns=names))
-        st.write("積立・取崩スケジュール（年別ネットキャッシュフロー、万円）")
-        st.dataframe(pd.DataFrame({"年": np.arange(1, T + 1), "ネットCF(万円)": flow_arr}))
+        st.write("積立・取崩スケジュール（月別ネットキャッシュフロー、万円）")
+        st.dataframe(
+            pd.DataFrame(
+                {
+                    "月": np.arange(1, T_months + 1),
+                    "経過年": np.arange(1, T_months + 1) / 12.0,
+                    "ネットCF(万円)": flow_arr,
+                }
+            )
+        )
         st.write(
-            f"モデル: 年次ステップ, {'毎年リバランスあり' if rebalance else 'リバランスなし（バイ&ホールド）'}, "
-            f"各銘柄は多変量正規分布に従う年次リターンを仮定。キャッシュフローは年始（当年の運用前）に反映。"
+            f"モデル: 月次ステップ（12回/年）, {'毎月リバランスあり' if rebalance else 'リバランスなし（バイ&ホールド）'}, "
+            f"各銘柄は相関を持つ多変量正規分布に従う月次リターンを仮定。キャッシュフローは毎月の運用開始前に反映。"
         )
 
     # --------------------------------------------------------
